@@ -1,0 +1,15 @@
+{
+    "include": ["src/**/*"],
+    "compilerOptions": {
+        // Ensure that .d.ts files are created by tsc, but not .js files
+        "declaration": true,
+        "emitDeclarationOnly": true,
+        "declarationMap": true,
+        "declarationDir": "build",
+        // Ensure that Babel can safely transpile files in the TypeScript project
+        "isolatedModules": true,
+
+        "noImplicitAny": true,
+        "strictNullChecks": true
+    }
+}
