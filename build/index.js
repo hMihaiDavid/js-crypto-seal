@@ -39,4 +39,17 @@ Object.defineProperty(exports, "unsealValue", {
     return _seal.unsealValue;
   }
 });
+Object.defineProperty(exports, "utf8Decode", {
+  enumerable: true,
+  get: function get() {
+    return _util.utf8Decode;
+  }
+});
+Object.defineProperty(exports, "utf8Encode", {
+  enumerable: true,
+  get: function get() {
+    return _util.utf8Encode;
+  }
+});
 var _seal = require("./seal");
+var _util = require("./util");

@@ -1,37 +1,13 @@
-//import { TextEncoder, TextDecoder } from 'util';
-// XXX TODO TextEncoder in the browser is somewhere else, see how uncrypto does conditional imports.
-
-// TODO:
-// gen typigs into separate folder,
-// make separate branch that cntain the babel and the dist for npm install and unpkg/jsdelivr.
-// put gen files in gitignore here
-// generate webpack mappings
-// make sure typings are accesible after an npm install of this library.
-// remove uncrypto dep and see if the util textencoder is ok to assume it's global.
-
 import { subtle, getRandomValues } from 'uncrypto';
+import { CryptoSealError, UNREACHABLE } from './errors';
+import { utf8Decode, utf8Encode } from './util';
 
-// XXX
-function assert(cond: any, s?: string) {
-    if (!cond) {
-        throw new Error(s || "");
-    }
-}
+const assert = require('assert'); // XXX too heavy for our needs.
 
-// XXX base64decode base64encode hexEncode hexDecode
-function utf8Encode(str: string): Uint8Array {
-    return (new TextEncoder()).encode(str);
-}
-
-function utf8Decode(data: Uint8Array): string {
-    return (new TextDecoder()).decode(data);
-}
-
-
-const DEFAULT_KDF_ROUNDS = 10; // XXX
+const DEFAULT_KDF_ROUNDS = 1000; // XXX
 
 const DEFAULT_CIPHER_STRING = 'AES-256-CBC-HMAC-SHA-256';
-const CIPHER_STRINGS_LIST = ['AES-256-CBC-HMAC-SHA-256'];
+const CIPHER_STRINGS_LIST = ['AES-256-GCM', 'AES-256-CBC-HMAC-SHA-256'];
 
 type StringToString = { [key: string]: string; };
 
@@ -45,15 +21,9 @@ function mapCipherAlias(cipher: string): string {
     return aliases[cipher] || cipher; 
 }
 
-// XXX advanced sealopts values: deconstruct {outputSalt, outputAuthTag...}, maybe, maybe not.
 export interface SealOptions {
-    kdfRounds?: number; // TODO if this is 0, disable kdf and use raw key material, but only if provided as buffer, or allow rawKey
-    cipher?: string; // TODO for later.
-    rawKey?: Uint8Array,
-}
-
-async function debugDumpKeyObj(s: string, key: any) {
-    console.log(s, await subtle.exportKey('raw', key));
+    kdfRounds?: number;
+    cipher?: string;
 }
 
 export async function sealValue(value: any, passphrase: string | Uint8Array, opts?: SealOptions) {
@@ -61,7 +31,7 @@ export async function sealValue(value: any, passphrase: string | Uint8Array, opt
 }
 
 export async function sealString(data: string, passphrase: string | Uint8Array, opts?: SealOptions) {
-    if (typeof(data) !== 'string') throw new Error("Invalid 'data'");
+    if (typeof(data) !== 'string') throw new CryptoSealError("Invalid 'data'");
     return sealBuffer(utf8Encode(data), passphrase, opts);
 }
 
@@ -69,27 +39,23 @@ function isPlainObject(o: Object) {
     return typeof(o) === 'object' && Object.getPrototypeOf(o) === Object.prototype;
 }
 
-// XXX consider using BufferSource as parameters like the web api
-// XXX dealloc keys as soon as they're not neeeded. and memset them to 0 first!
 export async function sealBuffer(data: Uint8Array, passphrase: string | Uint8Array, opts?: SealOptions) {
-    if (!(data instanceof Uint8Array)) throw new Error("Invalid 'data'.");
+    if (!(data instanceof Uint8Array)) throw new CryptoSealError("Invalid 'data'.");
     if (typeof(opts) === 'undefined') opts = {};
-    if (!isPlainObject(opts)) throw new Error("'opts' must be a plain object.");
+    if (!isPlainObject(opts)) throw new CryptoSealError("'opts' must be a plain object.");
 
     opts.cipher = opts.cipher || DEFAULT_CIPHER_STRING;
-    if (!CIPHER_STRINGS_LIST.includes(opts.cipher)) throw new Error("Invalid 'opts.cipher'.");
-
-    const salt = await randomSalt();
-    const masterKey = await getHKDFKeyObjectFromPassphraseOrKey(salt, passphrase, opts.kdfRounds, opts.rawKey);
-    
     opts.cipher = mapCipherAlias(opts.cipher);
+    if (!CIPHER_STRINGS_LIST.includes(opts.cipher)) throw new CryptoSealError("Invalid 'opts.cipher'.");
 
     switch (opts.cipher) {
         case 'AES-256-CBC-HMAC-SHA-256':
-            return sealBufferAes256CbcHmacSha256(data, masterKey, salt);
+            return sealBufferAes256CbcHmacSha256(data, passphrase, opts);
+        case 'AES-256-GCM':
+            return sealBufferAes256Gcm(data, passphrase, opts);
     }
 
-    throw new Error('UNREACHABLE');
+    throw new CryptoSealError(`Unsupported/invalid cipher '${opts.cipher}'`);
 }
 
 export async function unsealValue(data: Uint8Array, passphrase: string | Uint8Array, opts?: SealOptions) {
@@ -103,21 +69,22 @@ export async function unsealString(data: Uint8Array, passphrase: string | Uint8A
 }
 
 export async function unsealBuffer(data: Uint8Array, passphrase: string | Uint8Array, opts?: SealOptions) {
-    if (!(data instanceof Uint8Array)) throw new Error("Invalid 'data'.");
+    if (!(data instanceof Uint8Array)) throw new CryptoSealError("Invalid 'data'.");
     if (typeof(opts) === 'undefined') opts = {};
-    if (!isPlainObject(opts)) throw new Error("'opts' must be a plain object.");
+    if (!isPlainObject(opts)) throw new CryptoSealError("'opts' must be a plain object.");
 
     opts.cipher = opts.cipher || DEFAULT_CIPHER_STRING;
-    if (!CIPHER_STRINGS_LIST.includes(opts.cipher)) throw new Error("Invalid 'opts.cipher'.");
-
     opts.cipher = mapCipherAlias(opts.cipher);
+    if (!CIPHER_STRINGS_LIST.includes(opts.cipher)) throw new CryptoSealError("Invalid 'opts.cipher'.");
 
     switch (opts.cipher) {
         case 'AES-256-CBC-HMAC-SHA-256':
             return unsealBufferAes256CbcHmacSha256(data, passphrase, opts);
+        case 'AES-256-GCM':
+            return unsealBufferAes256Gcm(data, passphrase, opts);
     }
 
-    throw new Error('UNREACHABLE');
+    throw new CryptoSealError(`Unsupported/invalid cipher '${opts.cipher}'`);
 }
 
 async function aes256CbcHmacSha256Derive(masterKey: CryptoKey) {
@@ -131,10 +98,11 @@ async function aes256CbcHmacSha256Derive(masterKey: CryptoKey) {
     return { cipherSalt, cipherEncKey, cipherAuthKey };
 }
 
-async function sealBufferAes256CbcHmacSha256(data: Uint8Array, masterKey: CryptoKey, salt: Uint8Array) {
+async function sealBufferAes256CbcHmacSha256(data: Uint8Array, passphrase: string | Uint8Array, opts: SealOptions) {
+    const salt = await randomSalt();
+    const masterKey = await getHKDFKeyObjectFromPassphraseOrKey(salt, passphrase, opts.kdfRounds);
+    
     const { cipherSalt, cipherEncKey, cipherAuthKey } = await aes256CbcHmacSha256Derive(masterKey);
-
-    //await debugDumpKeyObj('seal auth key:', cipherAuthKey);
 
     const encryptedBlob = new Uint8Array(await subtle.encrypt({
         name: 'AES-CBC',
@@ -153,22 +121,17 @@ async function sealBufferAes256CbcHmacSha256(data: Uint8Array, masterKey: Crypto
 }
 
 async function unsealBufferAes256CbcHmacSha256(data: Uint8Array, passphrase: string | Uint8Array, opts: SealOptions) {
-    if (data.byteLength < 16 + 32) throw new Error("Invalid 'data'.");
+    if (data.byteLength < 16 + 32) throw new CryptoSealError("Invalid 'data'.");
     const salt = data.subarray(0, 16);
     const authData = data.subarray(0, data.byteLength - 32);
     const authTag = data.subarray(data.byteLength - 32);
     assert(authTag.length === 32);
-    //console.log('unseal auth tag:', authTag);
 
-    const masterKey = await getHKDFKeyObjectFromPassphraseOrKey(salt, passphrase, opts.kdfRounds, opts.rawKey);
+    const masterKey = await getHKDFKeyObjectFromPassphraseOrKey(salt, passphrase, opts.kdfRounds);
     const { cipherSalt, cipherEncKey, cipherAuthKey } = await aes256CbcHmacSha256Derive(masterKey);
-    
-
-    //await debugDumpKeyObj('unseal auth key:', cipherAuthKey);
 
     const verifyRes = await subtle.verify('HMAC', cipherAuthKey, authTag, authData);
-    //console.log('////// verifyRes', verifyRes);
-    if (verifyRes !== true) throw new Error("Invalid 'data' (authentication tag verification failed).");
+    if (verifyRes !== true) throw new CryptoSealError("Authentication tag verification failed (tampered or corrupted message).");
 
     const encData = data.subarray(16, data.byteLength - 32); // XXX what happens if empty?
     return subtle.decrypt({
@@ -177,35 +140,63 @@ async function unsealBufferAes256CbcHmacSha256(data: Uint8Array, passphrase: str
     }, cipherEncKey, encData);
 }
 
-async function getHKDFKeyObjectFromPassphraseOrKey(
-    salt: Uint8Array, passphrase?: string | Uint8Array, rounds?: number, rawKey?: Uint8Array
-): Promise<CryptoKey> {
-    if (passphrase) {
-        if (typeof(rawKey) !== 'undefined')
-            throw new Error("You can either provide a 'passphrase' or an 'opts.rawKey', not both.");
+async function aes256GcmDerive(masterKey: CryptoKey) {
+    const cipherSalt = await hkdfDeriveBits(masterKey, '/v1/seal/AES-256-GCM/salt', 128);
 
-        if (typeof(passphrase) === 'string') {
-            passphrase = utf8Encode(passphrase);
-        }
-        if (!(passphrase instanceof Uint8Array))
-            throw new Error("Invalid 'passphrase'.");
-        
-        rounds = Math.floor(rounds || DEFAULT_KDF_ROUNDS);
-        if (rounds in [Infinity, NaN] || rounds <= 0) throw new Error("Invalid 'rounds'.");
+    const cipherKey = await hkdfDeriveKeyObject(masterKey, '/v1/seal/AES-256-GCM/key',
+        { name: 'AES-GCM', length: 256 }, ['encrypt', 'decrypt']);
 
-        return deriveHKDFKeyObjectFromPassphrase(passphrase, salt, rounds);
-    } else if (rawKey) {
-        if (typeof(passphrase) !== 'undefined')
-            throw new Error("You can either provide a 'passphrase' or an 'opts.rawKey', not both.");
-        
-        if (!(rawKey instanceof Uint8Array))
-            throw new Error("Invalid 'opts.rawKey'.");
-
-        assert(false, "UNIMPLEMENTED");
-    }
-    
-    throw new Error("Either 'passphrase' or 'opts.rawKey' must be provided.");
+    return { cipherSalt, cipherKey };
 }
+
+async function sealBufferAes256Gcm(data: Uint8Array, passphrase: string | Uint8Array, opts: SealOptions) {
+    const salt = await randomSalt();
+    const masterKey = await getHKDFKeyObjectFromPassphraseOrKey(salt, passphrase, opts.kdfRounds);
+    
+    const { cipherSalt, cipherKey } = await aes256GcmDerive(masterKey);
+
+    // XXX support additionalData
+    const encryptedBlob = new Uint8Array(await subtle.encrypt({
+        name: 'AES-GCM',
+        iv: cipherSalt,
+        tagLength: 128,
+    }, cipherKey, data));
+
+    const result = new Uint8Array(16 /* salt */ + encryptedBlob.byteLength);
+    result.set(salt);
+    result.set(encryptedBlob, 16);
+
+    return result;
+}
+
+async function unsealBufferAes256Gcm(data: Uint8Array, passphrase: string | Uint8Array, opts: SealOptions) {
+    if (data.byteLength < 16 + 16) throw new CryptoSealError("Invalid 'data'.");
+    const salt = data.subarray(0, 16);
+
+    const masterKey = await getHKDFKeyObjectFromPassphraseOrKey(salt, passphrase, opts.kdfRounds);
+    const { cipherSalt, cipherKey } = await aes256GcmDerive(masterKey);
+    
+    const encData = data.subarray(16, data.byteLength);
+    return subtle.decrypt({
+        name: 'AES-GCM',
+        iv: cipherSalt,
+        tagLength: 128,
+    }, cipherKey, encData);
+}
+
+async function getHKDFKeyObjectFromPassphraseOrKey(salt: Uint8Array, passphrase?: string | Uint8Array, rounds?: number): Promise<CryptoKey> {
+    if (typeof(passphrase) === 'string') {
+        passphrase = utf8Encode(passphrase);
+    }
+
+    if (!(passphrase instanceof Uint8Array)) throw new CryptoSealError("Invalid 'passphrase'.")
+
+    rounds = Math.floor(rounds || DEFAULT_KDF_ROUNDS);
+    if (rounds in [Infinity, NaN] || rounds <= 0) throw new CryptoSealError("Invalid 'opts.rounds'.");
+
+    return deriveHKDFKeyObjectFromPassphrase(passphrase, salt, rounds);
+}
+
 
 async function deriveHKDFKeyObjectFromPassphrase(value: Uint8Array, salt: Uint8Array, rounds: number): Promise<CryptoKey> {
     const passphraseKeyObj = await subtle.importKey('raw', value, 'PBKDF2', false, ['deriveKey']);
@@ -247,7 +238,6 @@ async function randomSalt() {
 
 }
 
-// XXX return value type, in all funcs
 async function hkdfDeriveBits(hkdfKey: CryptoKey, derivePath: string, nbits?: number) {
     assert(derivePath.length > 0);
     return new Uint8Array(await subtle.deriveBits({
